@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Streamlit secrets (never commit)
+.streamlit/secrets.toml
+
+# OAuth tokens/keys (never commit)
+.oauth/
+token.json
+
+# Env files (never commit real keys)
+.env
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
