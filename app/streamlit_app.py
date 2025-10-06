@@ -156,7 +156,7 @@ st.markdown("""
 # ──────────────────────────────────────────────────────────────
 LANGS = ["Python", "C++", "Java"]
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
-DEFAULT_ANTHROPIC_MODEL = "claude-3.5-sonnet-20241022"
+DEFAULT_ANTHROPIC_MODEL = "claude-3-5-sonnet-20240620"
 
 SYSTEM_PROMPT_BASE = """You are a compiler-grade code transpiler.
 Convert the given source code from {src} to {tgt}.
