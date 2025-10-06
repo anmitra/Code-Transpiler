@@ -14,6 +14,7 @@ import tempfile
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
@@ -166,6 +167,16 @@ def extract_code(text: str) -> str:
     m = re.search(r"```[a-zA-Z0-9+]*\n(.*?)```", text, flags=re.S)
     return m.group(1).strip() if m else text.strip()
 
+def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
+    """Prefer environment; fall back to st.secrets if available; else default."""
+    val = os.getenv(key)
+    if val is not None:
+        return val
+    try:
+        return st.secrets.get(key, default)
+    except FileNotFoundError:
+        return default
+
 @dataclass
 class LLMRequest:
     system: str
@@ -174,7 +185,7 @@ class LLMRequest:
 
 def call_openai(req: LLMRequest) -> str:
     from openai import OpenAI
-    key = os.getenv("OPENAI_API_KEY", "").strip()
+    key = os.getenv("OPENAI_API_KEY", "").strip() or get_secret("OPENAI_API_KEY")
     if not key:
         raise RuntimeError("OPENAI_API_KEY missing in .env at project root.")
     client = OpenAI(api_key=key)
@@ -196,7 +207,7 @@ def call_openai(req: LLMRequest) -> str:
 
 def call_anthropic(req: LLMRequest) -> str:
     import anthropic
-    key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    key = os.getenv("ANTHROPIC_API_KEY", "").strip() or get_secret("ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError("ANTHROPIC_API_KEY missing in .env at project root.")
     client = anthropic.Anthropic(api_key=key)
