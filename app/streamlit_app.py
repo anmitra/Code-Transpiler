@@ -304,7 +304,7 @@ with st.sidebar:
 
     st.markdown("---")
     enable_exec = st.checkbox("Allow running code locally", value=False)
-    timeout_s = st.number_input("Timeout (seconds)", 1, 120, 10)
+    timeout_s = st.number_input("Timeout (seconds)", 1, 250, 10)
 
 # ──────────────────────────────────────────────────────────────
 # Default examples
