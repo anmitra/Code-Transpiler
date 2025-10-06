@@ -161,7 +161,8 @@ DEFAULT_ANTHROPIC_MODEL = "claude-3-5-sonnet-20240620"
 SYSTEM_PROMPT_BASE = """You are a compiler-grade code transpiler.
 Convert the given source code from {src} to {tgt}.
 Preserve logic, naming, and structure as much as possible.
-Output only valid {tgt} code (no markdown fences)."""
+Output only valid {tgt} code (no markdown fences).
+The response needs to produce an identical output in the fastest possible time."""
 
 def extract_code(text: str) -> str:
     m = re.search(r"```[a-zA-Z0-9+]*\n(.*?)```", text, flags=re.S)
