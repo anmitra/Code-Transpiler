@@ -1,15 +1,16 @@
-# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+*.log
+*.tmp
 .venv/
 venv/
-
-# Streamlit secrets (never commit)
-.streamlit/secrets.toml
-# Env files (never commit real keys)
 .env
-
-# OS / IDE
+secrets.toml
+.streamlit/secrets.toml
 .DS_Store
 .vscode/
 .idea/
+dist/
+build/
+.ipynb_checkpoints/
