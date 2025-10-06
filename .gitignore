@@ -6,11 +6,6 @@ venv/
 
 # Streamlit secrets (never commit)
 .streamlit/secrets.toml
-
-# OAuth tokens/keys (never commit)
-.oauth/
-token.json
-
 # Env files (never commit real keys)
 .env
 
