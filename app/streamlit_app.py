@@ -15,7 +15,7 @@ import subprocess
 import platform
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 import streamlit as st
 
@@ -222,29 +222,31 @@ def call_anthropic(req: LLMRequest) -> str:
     return "".join(getattr(b, "text", "") for b in msg.content).strip()
 
 # ──────────────────────────────────────────────────────────────
-# Java / C++ availability helpers
+# Toolchain availability + Java resolution
 # ──────────────────────────────────────────────────────────────
 def _which(cmd: str, path: Optional[str] = None) -> Optional[str]:
     return shutil.which(cmd, path=path) if path else shutil.which(cmd)
 
 def _set_path(bin_dir: str):
-    os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ.get('PATH','')}" if bin_dir not in os.environ.get("PATH","") else os.environ["PATH"]
+    if not bin_dir:
+        return
+    cur = os.environ.get("PATH", "")
+    if bin_dir not in cur.split(os.pathsep):
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{cur}"
 
-def resolve_java_paths() -> tuple[Optional[str], Optional[str]]:
+def resolve_java_paths():
     """
-    Try to locate java & javac. Attempt PATH -> macOS java_home -> JAVA_HOME.
+    Locate java & javac. Try PATH -> macOS java_home -> JAVA_HOME.
     If found via java_home/JAVA_HOME, prepend its bin to PATH for this process.
     """
     java  = _which("java")
     javac = _which("javac")
-
     if java and javac:
         return java, javac
 
-    # macOS: prefer /usr/libexec/java_home
+    # macOS: /usr/libexec/java_home
     if platform.system() == "Darwin":
         try:
-            # Prefer 17; fallback to any
             for v in ("17", "21", "11", ""):
                 args = ["/usr/libexec/java_home"] + (["-v", v] if v else [])
                 out = subprocess.check_output(args, text=True).strip()
@@ -259,7 +261,7 @@ def resolve_java_paths() -> tuple[Optional[str], Optional[str]]:
         except Exception:
             pass
 
-    # Any OS: try JAVA_HOME if set
+    # Any OS: JAVA_HOME
     jh = os.environ.get("JAVA_HOME")
     if jh:
         binp = os.path.join(jh, "bin")
@@ -275,6 +277,46 @@ def java_available() -> bool:
 
 def cpp_available() -> bool:
     return bool(_which("g++"))
+
+# ──────────────────────────────────────────────────────────────
+# Java snippet auto-wrapper
+# ──────────────────────────────────────────────────────────────
+def _java_has_type_declaration(code: str) -> bool:
+    # If user already provided a class/interface/enum/record, don't wrap
+    return bool(re.search(r'\b(class|interface|enum|record)\b', code))
+
+def _prepare_java_source(code: str):
+    """
+    Returns (prepared_source, class_name).
+    If snippet (no class/interface/enum/record), wrap into public class Main with a main().
+    Keep any leading import lines at the top.
+    """
+    if _java_has_type_declaration(code):
+        m = re.search(r'\bpublic\s+class\s+([A-Za-z_]\w*)', code)
+        cname = m.group(1) if m else "Main"
+        return code, cname
+
+    imports = []
+    body_lines = []
+    for line in code.splitlines():
+        if re.match(r'^\s*import\s+.+;\s*$', line):
+            imports.append(line.rstrip())
+        else:
+            body_lines.append(line)
+
+    body = "\n".join(body_lines).strip()
+    indented = "\n".join(("        " + ln if ln.strip() else "") for ln in body.splitlines())
+
+    wrapped = (
+        (("\n".join(imports) + "\n") if imports else "")
+        + "public class Main {\n"
+        + "    public static void main(String[] args) {\n"
+        + (indented if indented else "        // your code here\n")
+        + "\n"
+        + "    }\n"
+        + "}\n"
+    )
+    return wrapped, "Main"
 
 # ──────────────────────────────────────────────────────────────
 # Runners (local execution)
@@ -296,7 +338,6 @@ def run_python(code: str, timeout_s: int) -> dict:
 def run_cpp(code: str, timeout_s: int) -> dict:
     if not cpp_available():
         hint = "g++ not found on PATH."
-        # Helpful hint for Streamlit Cloud
         if os.getenv("STREAMLIT_RUNTIME", "") or os.getenv("STREAMLIT_SERVER_HOST", ""):
             hint += " On Streamlit Cloud, add 'build-essential' to packages.txt."
         return {"ok": False, "stdout": "", "stderr": hint, "time_s": 0.0, "compile_time_s": 0.0}
@@ -321,18 +362,18 @@ def run_java(code: str, timeout_s: int) -> dict:
     java, javac = resolve_java_paths()
     if not (java and javac):
         hint = "javac/java not found on PATH."
-        # Helpful hint for Streamlit Cloud
         if os.getenv("STREAMLIT_RUNTIME", "") or os.getenv("STREAMLIT_SERVER_HOST", ""):
             hint += " On Streamlit Cloud, create packages.txt with 'openjdk-17-jdk-headless'."
         else:
             hint += " Install a JDK (e.g., OpenJDK 17) and set JAVA_HOME."
         return {"ok": False, "stdout": "", "stderr": hint, "time_s": 0.0, "compile_time_s": 0.0}
 
-    m = re.search(r"public\s+class\s+([A-Za-z_]\w*)", code)
-    cname = m.group(1) if m else "Main"
+    # Auto-wrap snippets into a runnable class
+    prepared_code, cname = _prepare_java_source(code)
+
     with tempfile.TemporaryDirectory() as td:
         src = Path(td) / f"{cname}.java"
-        src.write_text(code, encoding="utf-8")
+        src.write_text(prepared_code, encoding="utf-8")
         ct0 = time.perf_counter()
         comp = subprocess.run([javac, str(src)], capture_output=True, text=True, cwd=td)
         ct = time.perf_counter() - ct0
@@ -392,11 +433,11 @@ EXAMPLES = {
 
 # session state for source / target code
 if "src_code" not in st.session_state:
-    st.session_state.src_code = EXAMPLES.get("Python", "")
+    st.session_state.src_code = EXAMPLES[src_lang]
 if "tgt_code" not in st.session_state:
     st.session_state.tgt_code = ""
 
-# Keep example aligned with selected source
+# If user cleared and switched, re-seed with example for chosen source
 if st.session_state.src_code == "" and src_lang in EXAMPLES:
     st.session_state.src_code = EXAMPLES[src_lang]
 
