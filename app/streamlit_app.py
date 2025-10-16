@@ -12,6 +12,7 @@ import time
 import shutil
 import tempfile
 import subprocess
+import platform
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -221,11 +222,63 @@ def call_anthropic(req: LLMRequest) -> str:
     return "".join(getattr(b, "text", "") for b in msg.content).strip()
 
 # ──────────────────────────────────────────────────────────────
+# Java / C++ availability helpers
+# ──────────────────────────────────────────────────────────────
+def _which(cmd: str, path: Optional[str] = None) -> Optional[str]:
+    return shutil.which(cmd, path=path) if path else shutil.which(cmd)
+
+def _set_path(bin_dir: str):
+    os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ.get('PATH','')}" if bin_dir not in os.environ.get("PATH","") else os.environ["PATH"]
+
+def resolve_java_paths() -> tuple[Optional[str], Optional[str]]:
+    """
+    Try to locate java & javac. Attempt PATH -> macOS java_home -> JAVA_HOME.
+    If found via java_home/JAVA_HOME, prepend its bin to PATH for this process.
+    """
+    java  = _which("java")
+    javac = _which("javac")
+
+    if java and javac:
+        return java, javac
+
+    # macOS: prefer /usr/libexec/java_home
+    if platform.system() == "Darwin":
+        try:
+            # Prefer 17; fallback to any
+            for v in ("17", "21", "11", ""):
+                args = ["/usr/libexec/java_home"] + (["-v", v] if v else [])
+                out = subprocess.check_output(args, text=True).strip()
+                if out:
+                    binp = os.path.join(out, "bin")
+                    _set_path(binp)
+                    os.environ["JAVA_HOME"] = out
+                    java  = java  or _which("java",  path=binp)
+                    javac = javac or _which("javac", path=binp)
+                    if java and javac:
+                        return java, javac
+        except Exception:
+            pass
+
+    # Any OS: try JAVA_HOME if set
+    jh = os.environ.get("JAVA_HOME")
+    if jh:
+        binp = os.path.join(jh, "bin")
+        _set_path(binp)
+        java  = java  or _which("java",  path=binp)
+        javac = javac or _which("javac", path=binp)
+
+    return java, javac
+
+def java_available() -> bool:
+    j, jc = resolve_java_paths()
+    return bool(j and jc)
+
+def cpp_available() -> bool:
+    return bool(_which("g++"))
+
+# ──────────────────────────────────────────────────────────────
 # Runners (local execution)
 # ──────────────────────────────────────────────────────────────
-def _which(cmd: str) -> bool:
-    return shutil.which(cmd) is not None
-
 def run_python(code: str, timeout_s: int) -> dict:
     with tempfile.TemporaryDirectory() as td:
         f = Path(td) / "main.py"
@@ -241,9 +294,13 @@ def run_python(code: str, timeout_s: int) -> dict:
                     "time_s": timeout_s, "compile_time_s": 0.0}
 
 def run_cpp(code: str, timeout_s: int) -> dict:
-    if not _which("g++"):
-        return {"ok": False, "stdout": "", "stderr": "g++ not found on PATH.",
-                "time_s": 0.0, "compile_time_s": 0.0}
+    if not cpp_available():
+        hint = "g++ not found on PATH."
+        # Helpful hint for Streamlit Cloud
+        if os.getenv("STREAMLIT_RUNTIME", "") or os.getenv("STREAMLIT_SERVER_HOST", ""):
+            hint += " On Streamlit Cloud, add 'build-essential' to packages.txt."
+        return {"ok": False, "stdout": "", "stderr": hint, "time_s": 0.0, "compile_time_s": 0.0}
+
     with tempfile.TemporaryDirectory() as td:
         cpp = Path(td) / "main.cpp"
         exe = Path(td) / ("main.exe" if os.name == "nt" else "main")
@@ -261,22 +318,29 @@ def run_cpp(code: str, timeout_s: int) -> dict:
                 "time_s": time.perf_counter()-t0, "compile_time_s": ct}
 
 def run_java(code: str, timeout_s: int) -> dict:
-    if not (_which("javac") and _which("java")):
-        return {"ok": False, "stdout": "", "stderr": "javac/java not found on PATH.",
-                "time_s": 0.0, "compile_time_s": 0.0}
+    java, javac = resolve_java_paths()
+    if not (java and javac):
+        hint = "javac/java not found on PATH."
+        # Helpful hint for Streamlit Cloud
+        if os.getenv("STREAMLIT_RUNTIME", "") or os.getenv("STREAMLIT_SERVER_HOST", ""):
+            hint += " On Streamlit Cloud, create packages.txt with 'openjdk-17-jdk-headless'."
+        else:
+            hint += " Install a JDK (e.g., OpenJDK 17) and set JAVA_HOME."
+        return {"ok": False, "stdout": "", "stderr": hint, "time_s": 0.0, "compile_time_s": 0.0}
+
     m = re.search(r"public\s+class\s+([A-Za-z_]\w*)", code)
     cname = m.group(1) if m else "Main"
     with tempfile.TemporaryDirectory() as td:
         src = Path(td) / f"{cname}.java"
         src.write_text(code, encoding="utf-8")
         ct0 = time.perf_counter()
-        comp = subprocess.run(["javac", str(src)], capture_output=True, text=True, cwd=td)
+        comp = subprocess.run([javac, str(src)], capture_output=True, text=True, cwd=td)
         ct = time.perf_counter() - ct0
         if comp.returncode != 0:
             return {"ok": False, "stdout": comp.stdout, "stderr": comp.stderr,
                     "time_s": 0.0, "compile_time_s": ct}
         t0 = time.perf_counter()
-        run = subprocess.run(["java", "-cp", td, cname], capture_output=True, text=True, timeout=timeout_s)
+        run = subprocess.run([java, "-cp", td, cname], capture_output=True, text=True, timeout=timeout_s)
         return {"ok": run.returncode == 0, "stdout": run.stdout, "stderr": run.stderr,
                 "time_s": time.perf_counter()-t0, "compile_time_s": ct}
 
@@ -307,6 +371,16 @@ with st.sidebar:
     enable_exec = st.checkbox("Allow running code locally", value=False)
     timeout_s = st.number_input("Timeout (seconds)", 1, 250, 10)
 
+    # Environment diagnostics (helpful on Streamlit Cloud)
+    st.markdown("---")
+    st.caption("Environment check")
+    st.write(f"Java available: {'✅' if java_available() else '❌'}")
+    st.write(f"g++ available: {'✅' if cpp_available() else '❌'}")
+    if not java_available():
+        st.info("If deploying on Streamlit Cloud, add `openjdk-17-jdk-headless` to packages.txt.")
+    if not cpp_available():
+        st.info("If deploying on Streamlit Cloud, add `build-essential` to packages.txt.")
+
 # ──────────────────────────────────────────────────────────────
 # Default examples
 # ──────────────────────────────────────────────────────────────
@@ -318,14 +392,17 @@ EXAMPLES = {
 
 # session state for source / target code
 if "src_code" not in st.session_state:
-    st.session_state.src_code = EXAMPLES[src_lang]
+    st.session_state.src_code = EXAMPLES.get("Python", "")
 if "tgt_code" not in st.session_state:
     st.session_state.tgt_code = ""
 
-# if language switch, update sample
+# Keep example aligned with selected source
 if st.session_state.src_code == "" and src_lang in EXAMPLES:
     st.session_state.src_code = EXAMPLES[src_lang]
 
+# ──────────────────────────────────────────────────────────────
+# Layout
+# ──────────────────────────────────────────────────────────────
 col_left, col_right = st.columns([1, 1], gap="large")
 
 with col_left:
@@ -349,7 +426,7 @@ with col_left:
     )
     st.session_state.src_code = src_text
 
-    # Toolbar row for actions (Load example, Clear) — download removed
+    # Toolbar row for actions (Load example, Clear)
     sbtns = st.columns([1,1,1])
     with sbtns[0]:
         if st.button("Load example", key="load_example_src"):
@@ -375,7 +452,7 @@ with col_right:
       </div>
     """, unsafe_allow_html=True)
 
-    # Target display (code block), plus action row (Load example / Clear) — download removed
+    # Target display (code block)
     out_placeholder = st.empty()
     out_code = st.session_state.get("tgt_code", "")
     if out_code:
@@ -389,7 +466,6 @@ with col_right:
     tbtns = st.columns([1,1,1])
     with tbtns[0]:
         if st.button("Load example", key="load_example_tgt"):
-            # Just drop a sample snippet for the target area (no API call)
             st.session_state.tgt_code = EXAMPLES[tgt_lang]
             st.rerun()
     with tbtns[1]:
